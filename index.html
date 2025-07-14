@@ -1,0 +1,1130 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 德州撲克 Pot Odds vs Equity 練習器</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+        
+        // Icon Components
+        const Brain = () => (
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"></path>
+                <path d="M12 2c-1.5 0-3 .5-4 1.5"></path>
+                <path d="M12 2c1.5 0 3 .5 4 1.5"></path>
+            </svg>
+        );
+        
+        const Settings = () => (
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M12 1v6m0 6v6m11-6h-6m-6 0H1"></path>
+            </svg>
+        );
+        
+        const MessageSquare = () => (
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+            </svg>
+        );
+
+        const AIPokerTrainer = () => {
+            // API 設定
+            const [apiKey, setApiKey] = useState(localStorage.getItem('deepseek_api_key') || '');
+            const [showApiSettings, setShowApiSettings] = useState(!apiKey);
+            const [aiEnabled, setAiEnabled] = useState(false);
+            const [aiAnalysis, setAiAnalysis] = useState('');
+            const [isLoadingAI, setIsLoadingAI] = useState(false);
+            
+            // 遊戲狀態
+            const [gameHistory, setGameHistory] = useState([]);
+            const [position, setPosition] = useState('BTN');
+            const [villainPosition, setVillainPosition] = useState('BB');
+            const [stackSize, setStackSize] = useState(100); // BB
+            const [gameStage, setGameStage] = useState('cash'); // cash or tournament
+            const [tourneyStage, setTourneyStage] = useState('early'); // early, mid, late, final
+            const [street, setStreet] = useState('flop'); // flop, turn, river
+            const [preflopAction, setPreflopAction] = useState('');
+            const [flopAction, setFlopAction] = useState('');
+            // 更複雜的對手範圍系統
+            const complexVillainRanges = {
+                'premium': 'AA-QQ, AKs, AKo',
+                'strong-value': 'JJ-99, AQs+, AQo+',
+                'medium-value': '88-66, AJs, KQs, AJo, KQo',
+                'draws': '同花聽牌, 順子聽牌, 組合聽牌',
+                'merged': '強牌 + 聽牌 + 詐唬',
+                'polarized': '堅果牌 + 純詐唬',
+                'capped': '沒有堅果牌的中等牌力',
+                'wide-bluff': '大量詐唬 + 少量價值',
+                'thin-value': '邊緣價值下注',
+                'multi-street-bluff': '多街詐唬',
+                'float-range': '浮動範圍（位置優勢）',
+                'check-raise': '過牌加注範圍',
+                'donk-bet': '領先下注範圍',
+                'triple-barrel': '三街開火範圍'
+            };
+            
+            // 原有的狀態（從原始代碼）
+            const suits = ['♠', '♥', '♦', '♣'];
+            const ranks = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2'];
+            const positions = ['UTG', 'UTG+1', 'MP', 'CO', 'BTN', 'SB', 'BB'];
+            
+            const [mode, setMode] = useState('practice');
+            const [heroCards, setHeroCards] = useState(['K♥', 'Q♥']);
+            const [board, setBoard] = useState(['Q♦', '3♥', '6♥', '', '']);
+            const [pot, setPot] = useState(1740);
+            const [betToCall, setBetToCall] = useState(670);
+            const [villainRange, setVillainRange] = useState('tptk');
+            const [showResult, setShowResult] = useState(false);
+            const [userDecision, setUserDecision] = useState(null);
+            const [score, setScore] = useState({ correct: 0, total: 0 });
+            const [autoNextTimer, setAutoNextTimer] = useState(null);
+            
+            // DeepSeek API 調用
+            const callDeepSeekAPI = async (prompt) => {
+                if (!apiKey) {
+                    return { error: '請先設定 API Key' };
+                }
+                
+                try {
+                    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${apiKey}`
+                        },
+                        body: JSON.stringify({
+                            model: "deepseek-chat",
+                            messages: [
+                                {
+                                    role: "system",
+                                    content: `你是一位德州撲克專家，精通 GTO (Game Theory Optimal) 策略。
+                                    請根據給定的場景生成真實的練習情況，包括：
+                                    1. 考慮位置、籌碼深度、遊戲階段
+                                    2. 生成合理的對手範圍
+                                    3. 設定合理的下注大小
+                                    4. 提供詳細的決策分析
+                                    請用繁體中文回答，並以 JSON 格式返回數據。`
+                                },
+                                {
+                                    role: "user",
+                                    content: prompt
+                                }
+                            ],
+                            temperature: 0.7,
+                            max_tokens: 1000
+                        })
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`API 錯誤: ${response.status}`);
+                    }
+                    
+                    const data = await response.json();
+                    return data.choices[0].message.content;
+                } catch (error) {
+                    console.error('DeepSeek API 錯誤:', error);
+                    return { error: error.message };
+                }
+            };
+            
+            // 生成 AI 增強的練習場景
+            const generateAIScenario = async () => {
+                setIsLoadingAI(true);
+                
+                // 根據街道決定動作歷史
+                let actionHistory = '';
+                if (street === 'turn') {
+                    actionHistory = `翻牌前動作: ${preflopAction || 'BTN raise 2.5BB, BB call'}
+翻牌動作: ${flopAction || 'BB check, BTN bet 60% pot, BB call'}`;
+                } else if (street === 'river') {
+                    actionHistory = `翻牌前動作: ${preflopAction || 'BTN raise 2.5BB, BB call'}
+翻牌動作: ${flopAction || 'BB check, BTN bet 60% pot, BB call'}
+轉牌動作: ${turnAction || 'BB check, BTN bet 70% pot, BB call'}`;
+                }
+                
+                const prompt = `
+                生成一個德州撲克${street === 'flop' ? '翻牌' : street === 'turn' ? '轉牌' : '河牌'}練習場景：
+                - 當前街道：${street}
+                - 位置：Hero 在 ${position}，Villain 在 ${villainPosition}
+                - 籌碼深度：${stackSize} BB
+                - 遊戲類型：${gameStage === 'cash' ? '現金遊戲' : `錦標賽 (${tourneyStage} 階段)`}
+                - 歷史：${gameHistory.length > 0 ? gameHistory.slice(-3).join(', ') : '無特殊歷史'}
+                ${actionHistory}
+                
+                請生成一個符合實際的場景，對手範圍要複雜且真實（可以是混合範圍）。
+                
+                請返回以下 JSON 格式：
+                {
+                    "heroCards": ["牌1", "牌2"],
+                    "board": ["flop1", "flop2", "flop3", ${street !== 'flop' ? '"turn"' : '""'}, ${street === 'river' ? '"river"' : '""'}],
+                    "pot": 底池大小,
+                    "betToCall": 需要跟注金額,
+                    "villainRange": "詳細的對手範圍描述",
+                    "villainRangeType": "範圍類型（如 polarized, merged, capped 等）",
+                    "scenario": "場景描述",
+                    "preflopAction": "翻牌前動作",
+                    "flopAction": "翻牌動作",
+                    "turnAction": "轉牌動作（如適用）",
+                    "analysis": "簡短分析",
+                    "exploits": "可能的剝削策略"
+                }
+                `;
+                
+                try {
+                    const response = await callDeepSeekAPI(prompt);
+                    if (response.error) {
+                        console.error('AI 錯誤:', response.error);
+                        // 回退到隨機生成
+                        generatePracticeScenario();
+                    } else {
+                        const scenario = JSON.parse(response);
+                        applyAIScenario(scenario);
+                    }
+                } catch (error) {
+                    console.error('解析 AI 回應錯誤:', error);
+                    // 回退到隨機生成
+                    generatePracticeScenario();
+                }
+                
+                setIsLoadingAI(false);
+            };
+            
+            // 應用 AI 生成的場景
+            const applyAIScenario = (scenario) => {
+                setHeroCards(scenario.heroCards || ['A♠', 'K♠']);
+                setBoard(scenario.board || ['Q♦', '3♥', '6♥', '', '']);
+                setPot(scenario.pot || 1000);
+                setBetToCall(scenario.betToCall || 500);
+                setVillainRange(scenario.villainRange || 'unknown range');
+                setAiAnalysis(scenario.analysis || '');
+                setPreflopAction(scenario.preflopAction || '');
+                setFlopAction(scenario.flopAction || '');
+                setTurnAction(scenario.turnAction || '');
+                setShowResult(false);
+                setUserDecision(null);
+            };
+            
+            // 獲取 AI 決策分析
+            const getAIDecisionAnalysis = async () => {
+                setIsLoadingAI(true);
+                
+                // 構建動作歷史
+                let actionHistory = '';
+                if (street === 'turn' || street === 'river') {
+                    actionHistory += `\n翻牌前動作: ${preflopAction || 'Standard open and call'}`;
+                    actionHistory += `\n翻牌動作: ${flopAction || 'Check-bet-call'}`;
+                }
+                if (street === 'river') {
+                    actionHistory += `\n轉牌動作: ${turnAction || 'Check-bet-call'}`;
+                }
+                
+                const prompt = `
+                分析以下德州撲克${street}情況：
+                - Hero 手牌：${heroCards.join(' ')}
+                - 公共牌：${board.filter(c => c).join(' ')}
+                - 底池：${pot}
+                - 需要跟注：${betToCall}
+                - 對手可能範圍：${villainRange}
+                - Hero 位置：${position}
+                - Villain 位置：${villainPosition}
+                - 籌碼深度：${stackSize} BB
+                - 當前街道：${street}
+                ${actionHistory}
+                
+                請提供以下分析：
+                1. 精確的 Equity 計算（考慮對手的整個範圍）
+                2. 期望值 (EV) 分析
+                3. GTO 建議（混合策略百分比）
+                4. 剝削性調整建議
+                5. 阻擋牌效應分析
+                6. 對手範圍中不同部分的分析
+                7. 未來街道的考慮（如適用）
+                8. 關鍵決策因素
+                
+                請用繁體中文，並提供具體的數字和百分比。
+                `;
+                
+                try {
+                    const response = await callDeepSeekAPI(prompt);
+                    if (!response.error) {
+                        setAiAnalysis(response);
+                    }
+                } catch (error) {
+                    console.error('獲取 AI 分析錯誤:', error);
+                }
+                
+                setIsLoadingAI(false);
+            };
+            
+            // 保存 API Key
+            const saveApiKey = () => {
+                localStorage.setItem('deepseek_api_key', apiKey);
+                setShowApiSettings(false);
+                setAiEnabled(true);
+            };
+            
+            // 計算 outs 的函數（保持原有邏輯）
+            const getUsedCards = () => {
+                const used = new Set();
+                heroCards.forEach(card => {
+                    if (card) used.add(card);
+                });
+                board.forEach(card => {
+                    if (card) used.add(card);
+                });
+                return used;
+            };
+            
+            // 其他計算函數保持不變...
+            const calculateFlushOuts = () => {
+                // 原有的 calculateFlushOuts 邏輯
+                const usedCards = getUsedCards();
+                const heroSuits = heroCards.map(card => card ? card[1] : null).filter(Boolean);
+                const boardCards = board.filter(card => card !== '');
+                const boardSuits = boardCards.map(card => card[1]);
+                
+                for (const suit of suits) {
+                    const heroSuitCount = heroSuits.filter(s => s === suit).length;
+                    const boardSuitCount = boardSuits.filter(s => s === suit).length;
+                    const totalSuitCards = heroSuitCount + boardSuitCount;
+                    
+                    if (totalSuitCards >= 5) {
+                        return {
+                            type: `已成同花 (${suit})`,
+                            count: 0,
+                            suit: suit,
+                            cards: [],
+                            isMade: true
+                        };
+                    } else if (totalSuitCards === 4) {
+                        const remainingFlushCards = [];
+                        ranks.forEach(rank => {
+                            const card = rank + suit;
+                            if (!usedCards.has(card)) {
+                                remainingFlushCards.push(card);
+                            }
+                        });
+                        
+                        let adjustedOuts = remainingFlushCards.length;
+                        if (villainRange === 'flush-draw' || villainRange === 'nut-flush') {
+                            adjustedOuts = Math.max(0, adjustedOuts - 2);
+                        }
+                        
+                        return {
+                            type: `同花聽牌 (${suit})`,
+                            count: adjustedOuts,
+                            suit: suit,
+                            cards: remainingFlushCards
+                        };
+                    }
+                }
+                
+                return null;
+            };
+            
+            const calculateStraightOuts = () => {
+                // 保持原有邏輯
+                const usedCards = getUsedCards();
+                const allCards = [...heroCards, ...board.filter(card => card !== '')];
+                const allRanks = allCards.map(card => card ? card[0] : null).filter(Boolean);
+                
+                const rankOrder = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2', 'A'];
+                const straightOuts = [];
+                
+                for (let i = 0; i < rankOrder.length - 4; i++) {
+                    const straight = rankOrder.slice(i, i + 5);
+                    const cardsInStraight = straight.filter(rank => allRanks.includes(rank));
+                    
+                    if (cardsInStraight.length === 4) {
+                        const missingRank = straight.find(rank => !allRanks.includes(rank));
+                        if (missingRank) {
+                            const availableCards = suits.map(suit => missingRank + suit)
+                                .filter(card => !usedCards.has(card));
+                            
+                            if (availableCards.length > 0) {
+                                let adjustedOuts = availableCards.length;
+                                if (villainRange === 'straight' || villainRange === 'sets') {
+                                    adjustedOuts = Math.max(0, adjustedOuts - 1);
+                                }
+                                
+                                straightOuts.push({
+                                    type: `順子 (需要${missingRank})`,
+                                    count: adjustedOuts,
+                                    rank: missingRank,
+                                    cards: availableCards
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                return straightOuts;
+            };
+            
+            const calculatePairOuts = () => {
+                // 保持原有邏輯
+                const usedCards = getUsedCards();
+                const heroRanks = heroCards.map(card => card ? card[0] : null).filter(Boolean);
+                const boardRanks = board.filter(card => card !== '').map(card => card[0]);
+                const allRanks = [...heroRanks, ...boardRanks];
+                const pairOuts = [];
+                
+                heroRanks.forEach(rank => {
+                    const totalCount = allRanks.filter(r => r === rank).length;
+                    const availableCards = suits.map(suit => rank + suit)
+                        .filter(card => !usedCards.has(card));
+                    
+                    if (availableCards.length > 0) {
+                        let description = '';
+                        let shouldInclude = true;
+                        let adjustedCount = availableCards.length;
+                        
+                        if (totalCount === 1) {
+                            description = `擊中${rank}成對子`;
+                            
+                            switch (villainRange) {
+                                case 'overpairs':
+                                    if (['A', 'K'].includes(rank)) {
+                                        description = `擊中${rank}成對子 (可能仍落後overpair)`;
+                                        adjustedCount = Math.max(0, adjustedCount - 1);
+                                    }
+                                    break;
+                                case 'tptk':
+                                    const topBoardRank = boardRanks.sort((a, b) => ranks.indexOf(a) - ranks.indexOf(b))[0];
+                                    if (ranks.indexOf(rank) > ranks.indexOf(topBoardRank)) {
+                                        shouldInclude = false;
+                                    }
+                                    break;
+                                case 'sets':
+                                    shouldInclude = false;
+                                    break;
+                                case 'two-pair':
+                                    shouldInclude = false;
+                                    break;
+                            }
+                        } else if (totalCount === 2) {
+                            description = `${rank}三條`;
+                            
+                            switch (villainRange) {
+                                case 'sets':
+                                    if (boardRanks.includes(rank)) {
+                                        shouldInclude = false;
+                                    }
+                                    break;
+                            }
+                        } else if (totalCount === 3) {
+                            description = `${rank}四條`;
+                        }
+                        
+                        if (shouldInclude && adjustedCount > 0) {
+                            pairOuts.push({
+                                type: description,
+                                count: adjustedCount,
+                                rank: rank,
+                                cards: availableCards.slice(0, adjustedCount)
+                            });
+                        }
+                    }
+                });
+                
+                return pairOuts;
+            };
+            
+            const calculateOuts = () => {
+                const outs = [];
+                
+                const flushOut = calculateFlushOuts();
+                if (flushOut) {
+                    if (flushOut.isMade) {
+                        outs.push(flushOut);
+                    } else if (flushOut.count > 0) {
+                        outs.push(flushOut);
+                    }
+                }
+                
+                const straightOuts = calculateStraightOuts();
+                straightOuts.forEach(out => {
+                    if (out.count > 0) outs.push(out);
+                });
+                
+                const pairOuts = calculatePairOuts();
+                pairOuts.forEach(out => {
+                    if (out.count > 0) outs.push(out);
+                });
+                
+                return outs;
+            };
+            
+            const getTotalOuts = () => {
+                const outs = calculateOuts();
+                const countedCards = new Set();
+                let totalOuts = 0;
+                
+                outs.forEach(out => {
+                    if (out.isMade) {
+                        return;
+                    }
+                    
+                    if (out.cards) {
+                        out.cards.forEach(card => {
+                            if (!countedCards.has(card)) {
+                                countedCards.add(card);
+                                totalOuts++;
+                            }
+                        });
+                    } else {
+                        totalOuts += out.count;
+                    }
+                });
+                
+                return totalOuts;
+            };
+            
+            const calculateEquity = () => {
+                const totalOuts = getTotalOuts();
+                const cardsTocome = board.filter(card => card === '').length;
+                
+                if (cardsTocome === 2) {
+                    return Math.min(totalOuts * 4, 60);
+                } else if (cardsTocome === 1) {
+                    return totalOuts * 2;
+                }
+                return 0;
+            };
+            
+            const calculatePotOdds = () => {
+                const totalPot = pot + betToCall;
+                const potOdds = (betToCall / totalPot) * 100;
+                return potOdds.toFixed(1);
+            };
+            
+            const shouldCall = () => {
+                const equity = calculateEquity();
+                const potOdds = parseFloat(calculatePotOdds());
+                return equity > potOdds;
+            };
+            
+            // 隨機生成場景（原有邏輯）
+            const generatePracticeScenario = () => {
+                if (autoNextTimer) {
+                    clearTimeout(autoNextTimer);
+                    setAutoNextTimer(null);
+                }
+                
+                const newHeroCards = [];
+                const usedCards = new Set();
+                
+                for (let i = 0; i < 2; i++) {
+                    let card;
+                    do {
+                        const rank = ranks[Math.floor(Math.random() * ranks.length)];
+                        const suit = suits[Math.floor(Math.random() * suits.length)];
+                        card = rank + suit;
+                    } while (usedCards.has(card));
+                    usedCards.add(card);
+                    newHeroCards.push(card);
+                }
+                
+                const newBoard = ['', '', '', '', ''];
+                
+                // 生成 flop
+                for (let i = 0; i < 3; i++) {
+                    let card;
+                    do {
+                        const rank = ranks[Math.floor(Math.random() * ranks.length)];
+                        const suit = suits[Math.floor(Math.random() * suits.length)];
+                        card = rank + suit;
+                    } while (usedCards.has(card));
+                    usedCards.add(card);
+                    newBoard[i] = card;
+                }
+                
+                // 根據街道生成 turn 和 river
+                if (street === 'turn' || street === 'river') {
+                    let card;
+                    do {
+                        const rank = ranks[Math.floor(Math.random() * ranks.length)];
+                        const suit = suits[Math.floor(Math.random() * suits.length)];
+                        card = rank + suit;
+                    } while (usedCards.has(card));
+                    usedCards.add(card);
+                    newBoard[3] = card;
+                }
+                
+                if (street === 'river') {
+                    let card;
+                    do {
+                        const rank = ranks[Math.floor(Math.random() * ranks.length)];
+                        const suit = suits[Math.floor(Math.random() * suits.length)];
+                        card = rank + suit;
+                    } while (usedCards.has(card));
+                    usedCards.add(card);
+                    newBoard[4] = card;
+                }
+                
+                // 隨機選擇複雜的對手範圍
+                const rangeTypes = Object.keys(complexVillainRanges);
+                const randomRangeType = rangeTypes[Math.floor(Math.random() * rangeTypes.length)];
+                const randomRange = complexVillainRanges[randomRangeType];
+                
+                // 根據街道調整底池和下注大小
+                let newPot, newBet;
+                if (street === 'flop') {
+                    newPot = Math.floor(Math.random() * 1000) + 300;
+                    newBet = Math.floor(newPot * (0.3 + Math.random() * 0.7));
+                } else if (street === 'turn') {
+                    newPot = Math.floor(Math.random() * 2000) + 800;
+                    newBet = Math.floor(newPot * (0.5 + Math.random() * 0.8));
+                } else {
+                    newPot = Math.floor(Math.random() * 3000) + 1500;
+                    newBet = Math.floor(newPot * (0.5 + Math.random() * 1.0));
+                }
+                
+                setHeroCards(newHeroCards);
+                setBoard(newBoard);
+                setPot(newPot);
+                setBetToCall(newBet);
+                setVillainRange(`${randomRangeType}: ${randomRange}`);
+                setShowResult(false);
+                setUserDecision(null);
+                setAiAnalysis('');
+            };
+            
+            const handleDecision = (decision) => {
+                setUserDecision(decision);
+                setShowResult(true);
+                
+                const correctDecision = shouldCall();
+                const isCorrect = (decision === 'call' && correctDecision) || (decision === 'fold' && !correctDecision);
+                
+                if (isCorrect) {
+                    setScore(prev => ({ correct: prev.correct + 1, total: prev.total + 1 }));
+                    const timer = setTimeout(() => {
+                        if (aiEnabled) {
+                            generateAIScenario();
+                        } else {
+                            generatePracticeScenario();
+                        }
+                    }, 1500);
+                    setAutoNextTimer(timer);
+                } else {
+                    setScore(prev => ({ ...prev, total: prev.total + 1 }));
+                }
+                
+                // 記錄遊戲歷史
+                const action = `${position}: ${decision} (${isCorrect ? '✓' : '✗'})`;
+                setGameHistory(prev => [...prev.slice(-9), action]);
+            };
+            
+            // 初始載入時生成場景
+            useEffect(() => {
+                if (aiEnabled && apiKey) {
+                    generateAIScenario();
+                } else {
+                    generatePracticeScenario();
+                }
+            }, []); // 只在初始載入時執行
+            
+            // 清理 timer
+            useEffect(() => {
+                return () => {
+                    if (autoNextTimer) {
+                        clearTimeout(autoNextTimer);
+                    }
+                };
+            }, [autoNextTimer]);
+            
+            // Card selector component
+            const CardSelector = ({ value, onChange, disabled }) => {
+                const usedCards = getUsedCards();
+                
+                return (
+                    <select
+                        value={value}
+                        onChange={(e) => onChange(e.target.value)}
+                        disabled={disabled}
+                        className="px-2 py-1 bg-gray-700 rounded border border-gray-600 text-sm focus:border-blue-500 focus:outline-none"
+                    >
+                        <option value="">--</option>
+                        {ranks.map(rank => 
+                            suits.map(suit => {
+                                const card = rank + suit;
+                                const isUsed = usedCards.has(card) && card !== value;
+                                return (
+                                    <option key={card} value={card} disabled={isUsed} style={{ color: isUsed ? '#888' : 'inherit' }}>
+                                        {card} {isUsed ? '(已使用)' : ''}
+                                    </option>
+                                );
+                            })
+                        )}
+                    </select>
+                );
+            };
+            
+            const equity = calculateEquity();
+            const potOdds = parseFloat(calculatePotOdds());
+            const outs = calculateOuts();
+            const totalOuts = getTotalOuts();
+            
+            return (
+                <div className="max-w-6xl mx-auto p-6 bg-gray-900 text-white rounded-lg shadow-xl">
+                    <div className="flex items-center justify-between mb-6">
+                        <h1 className="text-3xl font-bold flex items-center gap-2">
+                            <Brain />
+                            AI 增強版德州撲克練習器
+                        </h1>
+                        <button
+                            onClick={() => setShowApiSettings(!showApiSettings)}
+                            className="p-2 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors"
+                        >
+                            <Settings />
+                        </button>
+                    </div>
+                    
+                    {/* API 設定面板 */}
+                    {showApiSettings && (
+                        <div className="mb-6 p-4 bg-gray-800 rounded-lg">
+                            <h3 className="text-lg font-semibold mb-3">DeepSeek API 設定</h3>
+                            <div className="flex gap-3">
+                                <input
+                                    type="password"
+                                    value={apiKey}
+                                    onChange={(e) => setApiKey(e.target.value)}
+                                    placeholder="輸入你的 DeepSeek API Key"
+                                    className="flex-1 px-3 py-2 bg-gray-700 rounded border border-gray-600 focus:border-blue-500 focus:outline-none"
+                                />
+                                <button
+                                    onClick={saveApiKey}
+                                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded transition-colors"
+                                >
+                                    保存
+                                </button>
+                                <button
+                                    onClick={() => setAiEnabled(!aiEnabled)}
+                                    className={`px-4 py-2 rounded transition-colors ${
+                                        aiEnabled ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600 hover:bg-gray-700'
+                                    }`}
+                                >
+                                    AI {aiEnabled ? '已啟用' : '已停用'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* 遊戲設定 */}
+                    <div className="mb-6 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                        <div>
+                            <label className="block text-xs font-medium mb-1">街道</label>
+                            <select
+                                value={street}
+                                onChange={(e) => setStreet(e.target.value)}
+                                className="w-full px-2 py-1 bg-gray-700 rounded border border-gray-600 text-sm"
+                            >
+                                <option value="flop">Flop</option>
+                                <option value="turn">Turn</option>
+                                <option value="river">River</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-xs font-medium mb-1">Hero 位置</label>
+                            <select
+                                value={position}
+                                onChange={(e) => setPosition(e.target.value)}
+                                className="w-full px-2 py-1 bg-gray-700 rounded border border-gray-600 text-sm"
+                            >
+                                {positions.map(pos => (
+                                    <option key={pos} value={pos}>{pos}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-xs font-medium mb-1">Villain 位置</label>
+                            <select
+                                value={villainPosition}
+                                onChange={(e) => setVillainPosition(e.target.value)}
+                                className="w-full px-2 py-1 bg-gray-700 rounded border border-gray-600 text-sm"
+                            >
+                                {positions.map(pos => (
+                                    <option key={pos} value={pos}>{pos}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-xs font-medium mb-1">籌碼深度 (BB)</label>
+                            <input
+                                type="number"
+                                value={stackSize}
+                                onChange={(e) => setStackSize(parseInt(e.target.value) || 100)}
+                                className="w-full px-2 py-1 bg-gray-700 rounded border border-gray-600 text-sm"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-xs font-medium mb-1">遊戲類型</label>
+                            <select
+                                value={gameStage}
+                                onChange={(e) => setGameStage(e.target.value)}
+                                className="w-full px-2 py-1 bg-gray-700 rounded border border-gray-600 text-sm"
+                            >
+                                <option value="cash">現金遊戲</option>
+                                <option value="tournament">錦標賽</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    {/* 練習模式統計 */}
+                    <div className="mb-6 text-center">
+                        <span className="text-lg">
+                            正確率: {score.total > 0 ? ((score.correct / score.total) * 100).toFixed(1) : 0}% 
+                            ({score.correct}/{score.total})
+                        </span>
+                    </div>
+                    
+                    <div className="grid lg:grid-cols-3 gap-6">
+                        {/* 左側：手牌和公共牌 */}
+                        <div className="space-y-4">
+                            <div className="bg-gray-800 p-4 rounded-lg">
+                                <h2 className="text-xl font-semibold mb-4">手牌設定</h2>
+                                
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">你的手牌 (Hero)</label>
+                                        <div className="flex gap-2">
+                                            {heroCards.map((card, i) => (
+                                                <CardSelector
+                                                    key={i}
+                                                    value={card}
+                                                    onChange={(newCard) => {
+                                                        const newCards = [...heroCards];
+                                                        newCards[i] = newCard;
+                                                        setHeroCards(newCards);
+                                                    }}
+                                                    disabled={mode === 'practice'}
+                                                />
+                                            ))}
+                                        </div>
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">公共牌 (Board)</label>
+                                        <div className="flex gap-2">
+                                            {board.map((card, i) => (
+                                                <CardSelector
+                                                    key={i}
+                                                    value={card}
+                                                    onChange={(newCard) => {
+                                                        const newBoard = [...board];
+                                                        newBoard[i] = newCard;
+                                                        setBoard(newBoard);
+                                                    }}
+                                                    disabled={mode === 'practice' || (i > 2 && board[2] === '')}
+                                                />
+                                            ))}
+                                        </div>
+                                        <p className="text-xs text-gray-400 mt-1">Flop → Turn → River</p>
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">對手範圍</label>
+                                        <textarea
+                                            value={villainRange}
+                                            onChange={(e) => setVillainRange(e.target.value)}
+                                            className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600 focus:border-blue-500 focus:outline-none text-xs"
+                                            disabled={mode === 'practice'}
+                                            rows="2"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            {/* Outs 顯示 */}
+                            <div className="bg-gray-800 p-4 rounded-lg">
+                                <h2 className="text-xl font-semibold mb-4">Outs 分析</h2>
+                                <div className="space-y-2 text-sm">
+                                    {outs.map((out, i) => (
+                                        <div key={i} className={`flex justify-between ${out.isMade ? 'text-green-400' : ''}`}>
+                                            <span className="flex-1">{out.type}</span>
+                                            <span className="font-mono text-right">
+                                                {out.isMade ? '已成牌' : `${out.count} outs`}
+                                            </span>
+                                        </div>
+                                    ))}
+                                    {outs.length === 0 && (
+                                        <div className="text-gray-400 text-center py-2">
+                                            沒有明顯的聽牌
+                                        </div>
+                                    )}
+                                    <div className="border-t border-gray-600 pt-2 flex justify-between font-semibold">
+                                        <span>總計</span>
+                                        <span className="font-mono">{totalOuts} outs</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        {/* 中間：底池資訊和控制 */}
+                        <div className="space-y-4">
+                            <div className="bg-gray-800 p-4 rounded-lg">
+                                <h2 className="text-xl font-semibold mb-4">底池資訊</h2>
+                                
+                                <div className="space-y-3">
+                                    <div className="bg-yellow-900 p-3 rounded text-sm">
+                                        <p className="font-semibold">對手可能持有:</p>
+                                        <p className="mt-1">{villainRange}</p>
+                                        {street !== 'flop' && (
+                                            <p className="text-xs text-gray-400 mt-2">
+                                                考慮前街動作：{street === 'turn' ? '翻牌' : '翻牌和轉牌'}的下注模式
+                                            </p>
+                                        )}
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">當前底池</label>
+                                        <input
+                                            type="number"
+                                            value={pot}
+                                            onChange={(e) => setPot(parseInt(e.target.value) || 0)}
+                                            className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600 focus:border-blue-500 focus:outline-none"
+                                            disabled={mode === 'practice'}
+                                        />
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">需要跟注金額</label>
+                                        <input
+                                            type="number"
+                                            value={betToCall}
+                                            onChange={(e) => setBetToCall(parseInt(e.target.value) || 0)}
+                                            className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600 focus:border-blue-500 focus:outline-none"
+                                            disabled={mode === 'practice'}
+                                        />
+                                    </div>
+                                    
+                                    <div className="text-sm text-gray-400">
+                                        <p>跟注後底池: ${pot + betToCall * 2}</p>
+                                        <p>底池賠率: ${betToCall} to win ${pot + betToCall}</p>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            {/* 練習控制按鈕 */}
+                            <div className="space-y-3">
+                                {/* 動作歷史（僅在 turn 或 river 顯示） */}
+                                {(street === 'turn' || street === 'river') && (
+                                    <div className="bg-gray-700 p-3 rounded text-xs">
+                                        <p className="font-semibold mb-2">動作歷史</p>
+                                        <div className="space-y-1">
+                                            <div>
+                                                <span className="text-gray-400">Preflop:</span>
+                                                <input
+                                                    type="text"
+                                                    value={preflopAction}
+                                                    onChange={(e) => setPreflopAction(e.target.value)}
+                                                    placeholder="例: BTN raise 2.5BB, BB call"
+                                                    className="w-full mt-1 px-2 py-1 bg-gray-800 rounded text-xs"
+                                                />
+                                            </div>
+                                            <div>
+                                                <span className="text-gray-400">Flop:</span>
+                                                <input
+                                                    type="text"
+                                                    value={flopAction}
+                                                    onChange={(e) => setFlopAction(e.target.value)}
+                                                    placeholder="例: BB check, BTN bet 60%, BB call"
+                                                    className="w-full mt-1 px-2 py-1 bg-gray-800 rounded text-xs"
+                                                />
+                                            </div>
+                                            {street === 'river' && (
+                                                <div>
+                                                    <span className="text-gray-400">Turn:</span>
+                                                    <input
+                                                        type="text"
+                                                        value={turnAction}
+                                                        onChange={(e) => setTurnAction(e.target.value)}
+                                                        placeholder="例: BB check, BTN bet 75%, BB call"
+                                                        className="w-full mt-1 px-2 py-1 bg-gray-800 rounded text-xs"
+                                                    />
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                {aiEnabled && (
+                                    <button
+                                        onClick={getAIDecisionAnalysis}
+                                        disabled={isLoadingAI}
+                                        className="w-full px-4 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2"
+                                    >
+                                        <MessageSquare />
+                                        {isLoadingAI ? '分析中...' : '獲取 AI 分析'}
+                                    </button>
+                                )}
+                                
+                                <button
+                                    onClick={() => handleDecision('call')}
+                                    disabled={showResult}
+                                    className="w-full px-4 py-3 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 rounded-lg font-semibold transition-colors"
+                                >
+                                    跟注 (Call)
+                                </button>
+                                <button
+                                    onClick={() => handleDecision('fold')}
+                                    disabled={showResult}
+                                    className="w-full px-4 py-3 bg-red-600 hover:bg-red-700 disabled:bg-gray-600 rounded-lg font-semibold transition-colors"
+                                >
+                                    棄牌 (Fold)
+                                </button>
+                                
+                                {showResult && (
+                                    <button
+                                        onClick={() => aiEnabled ? generateAIScenario() : generatePracticeScenario()}
+                                        disabled={isLoadingAI}
+                                        className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded-lg font-semibold transition-colors"
+                                    >
+                                        {isLoadingAI ? '生成中...' : '下一題'}
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                        
+                        {/* 右側：計算結果和 AI 分析 */}
+                        <div className="space-y-4">
+                            <div className="bg-gray-800 p-4 rounded-lg">
+                                <h2 className="text-xl font-semibold mb-4">計算結果</h2>
+                                
+                                <div className="space-y-3">
+                                    <div className="bg-gray-700 p-3 rounded">
+                                        <div className="flex justify-between items-center mb-2">
+                                            <span>Pot Odds</span>
+                                            <span className="font-mono text-lg">{potOdds}%</span>
+                                        </div>
+                                        <p className="text-xs text-gray-400">
+                                            {betToCall} / ({pot} + {betToCall}) = {potOdds}%
+                                        </p>
+                                    </div>
+                                    
+                                    <div className="bg-gray-700 p-3 rounded">
+                                        <div className="flex justify-between items-center mb-2">
+                                            <span>你的 Equity</span>
+                                            <span className="font-mono text-lg">{equity}%</span>
+                                        </div>
+                                        <p className="text-xs text-gray-400">
+                                            {totalOuts} outs × {board.filter(c => c === '').length === 2 ? '4' : '2'}% = {equity}%
+                                        </p>
+                                    </div>
+                                    
+                                    <div className={`p-3 rounded ${equity > potOdds ? 'bg-green-900' : 'bg-red-900'}`}>
+                                        <p className="font-semibold mb-1">
+                                            {!showResult ? '請做出決定...' : 
+                                             `建議: ${equity > potOdds ? '跟注 (Call) +EV' : '棄牌 (Fold) -EV'}`}
+                                        </p>
+                                        {showResult && (
+                                            <p className="text-sm">
+                                                Equity ({equity}%) {equity > potOdds ? '>' : '<'} Pot Odds ({potOdds}%)
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            {/* AI 分析 */}
+                            {aiAnalysis && (
+                                <div className="bg-gray-800 p-4 rounded-lg">
+                                    <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                                        <Brain />
+                                        AI 分析
+                                    </h3>
+                                    <div className="text-sm text-gray-300 whitespace-pre-wrap max-h-64 overflow-y-auto">
+                                        {aiAnalysis}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    
+                    {/* 遊戲歷史 */}
+                    {gameHistory.length > 0 && (
+                        <div className="mt-6 bg-gray-800 p-4 rounded-lg">
+                            <h3 className="text-lg font-semibold mb-2">最近遊戲歷史</h3>
+                            <div className="flex flex-wrap gap-2">
+                                {gameHistory.map((action, i) => (
+                                    <span key={i} className="text-sm bg-gray-700 px-2 py-1 rounded">
+                                        {action}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* 使用說明 */}
+                    <div className="mt-8 bg-gray-800 p-4 rounded-lg">
+                        <h3 className="text-lg font-semibold mb-2">AI 增強功能說明</h3>
+                        <div className="grid md:grid-cols-3 gap-4 text-sm text-gray-300">
+                            <div>
+                                <p className="font-semibold mb-1 text-purple-400">多街道練習</p>
+                                <ul className="space-y-1">
+                                    <li>• 支援 Flop、Turn、River 場景</li>
+                                    <li>• 記錄完整動作歷史</li>
+                                    <li>• 考慮前街動作的影響</li>
+                                    <li>• 真實的下注模式</li>
+                                </ul>
+                            </div>
+                            <div>
+                                <p className="font-semibold mb-1 text-purple-400">複雜對手範圍</p>
+                                <ul className="space-y-1">
+                                    <li>• Polarized（兩極化）範圍</li>
+                                    <li>• Merged（混合）範圍</li>
+                                    <li>• Capped（有上限）範圍</li>
+                                    <li>• 多街詐唬和薄價值</li>
+                                    <li>• 位置相關的範圍調整</li>
+                                </ul>
+                            </div>
+                            <div>
+                                <p className="font-semibold mb-1 text-purple-400">進階 AI 分析</p>
+                                <ul className="space-y-1">
+                                    <li>• 精確範圍 vs 範圍分析</li>
+                                    <li>• 阻擋牌效應計算</li>
+                                    <li>• GTO 混合策略百分比</li>
+                                    <li>• 剝削性調整建議</li>
+                                    <li>• 未來街道規劃</li>
+                                </ul>
+                            </div>
+                        </div>
+                        
+                        <div className="mt-4 p-3 bg-gray-700 rounded">
+                            <p className="font-semibold text-yellow-400 mb-2">對手範圍類型說明：</p>
+                            <div className="grid md:grid-cols-2 gap-2 text-xs">
+                                <div>
+                                    <span className="font-semibold">Polarized:</span> 堅果牌 + 純詐唬，沒有中等牌力
+                                </div>
+                                <div>
+                                    <span className="font-semibold">Merged:</span> 強牌 + 中等牌 + 聽牌 + 詐唬
+                                </div>
+                                <div>
+                                    <span className="font-semibold">Capped:</span> 沒有超強牌的範圍
+                                </div>
+                                <div>
+                                    <span className="font-semibold">Triple Barrel:</span> 三街持續下注範圍
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // 渲染應用
+        ReactDOM.render(<AIPokerTrainer />, document.getElementById('root'));
+    </script>
+</body>
+</html>
